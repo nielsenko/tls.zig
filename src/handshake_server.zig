@@ -409,16 +409,22 @@ pub const Handshake = struct {
         { // cipher suites
             const end_idx = try d.decode(u16) + d.idx;
 
+            // The first of the server's suites that the client offers. The
+            // server lists ChaCha20 first when it has no AES instructions,
+            // and most clients list AES first whatever the server has.
+            var best: usize = supported_cipher_suites.len;
             while (d.idx < end_idx) {
                 const cipher_suite = try d.decode(CipherSuite);
-                if (cipher_suites.includes(supported_cipher_suites, cipher_suite) and
-                    @intFromEnum(h.cipher_suite) == 0)
-                {
-                    h.cipher_suite = cipher_suite;
+                for (supported_cipher_suites[0..best], 0..) |supported, at| {
+                    if (supported == cipher_suite) {
+                        best = at;
+                        break;
+                    }
                 }
             }
-            if (@intFromEnum(h.cipher_suite) == 0)
+            if (best == supported_cipher_suites.len)
                 return error.TlsNoSupportedCiphers;
+            h.cipher_suite = supported_cipher_suites[best];
         }
         try d.skip(2); // compression methods
 
@@ -546,10 +552,38 @@ test "read client hello" {
     h.signature_scheme = .ecdsa_secp521r1_sha512; // this must be supported in signature_algorithms extension
     try h.readClientHello(cipher_suites.tls13, &.{});
 
-    try testing.expectEqual(CipherSuite.AES_256_GCM_SHA384, h.cipher_suite);
+    // The client offers all three TLS 1.3 suites.
+    try testing.expectEqual(cipher_suites.tls13[0], h.cipher_suite);
     try testing.expectEqual(.x25519, h.named_group);
     try testing.expectEqualSlices(u8, &data13.client_random, &h.client_random);
     try testing.expectEqualSlices(u8, &data13.client_public_key, h.client_pub_key);
+}
+
+test "read client hello: the server's order picks the cipher suite" {
+    // The client lists AES_256_GCM_SHA384, then CHACHA20_POLY1305_SHA256,
+    // then AES_128_GCM_SHA256.
+    const cases = [_]struct { server: []const CipherSuite, expected: CipherSuite }{
+        .{ .server = &.{ .CHACHA20_POLY1305_SHA256, .AES_256_GCM_SHA384 }, .expected = .CHACHA20_POLY1305_SHA256 },
+        .{ .server = &.{ .AES_128_GCM_SHA256, .CHACHA20_POLY1305_SHA256 }, .expected = .AES_128_GCM_SHA256 },
+        .{ .server = &.{.AES_256_GCM_SHA384}, .expected = .AES_256_GCM_SHA384 },
+    };
+    for (cases) |case| {
+        var reader: Io.Reader = .fixed(&data13.client_hello);
+        var h: Handshake = .{ .input = &reader, .output = undefined };
+        h.signature_scheme = .ecdsa_secp521r1_sha512;
+        try h.readClientHello(case.server, &.{});
+        try testing.expectEqual(case.expected, h.cipher_suite);
+    }
+}
+
+test "read client hello: no suite in common is refused" {
+    var reader: Io.Reader = .fixed(&data13.client_hello);
+    var h: Handshake = .{ .input = &reader, .output = undefined };
+    h.signature_scheme = .ecdsa_secp521r1_sha512;
+    try testing.expectError(
+        error.TlsNoSupportedCiphers,
+        h.readClientHello(&.{.ECDHE_RSA_WITH_AES_128_GCM_SHA256}, &.{}),
+    );
 }
 
 test "make server hello" {
