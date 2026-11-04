@@ -257,6 +257,10 @@ pub const Alert = enum(u8) {
             error.TlsUnknownPskIdentity => .unknown_psk_identity,
             error.TlsCertificateRequired => .certificate_required,
             error.TlsNoApplicationProtocol => .no_application_protocol,
+            // A peer certificate that std's verifier refused.
+            error.CertificateIssuerNotFound => .unknown_ca,
+            error.CertificateExpired, error.CertificateNotYetValid => .certificate_expired,
+            error.CertificateSignatureInvalid, error.CertificateIssuerMismatch => .bad_certificate,
             else => .internal_error,
         };
     }
