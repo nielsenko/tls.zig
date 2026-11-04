@@ -157,6 +157,7 @@ pub const cert = struct {
         const ts = Io.Clock.real.now(io);
 
         var bundle: Bundle = .empty;
+        errdefer bundle.deinit(allocator);
 
         //Contains modified code from std.crypto.Certificate.Bundle.addCertsFromFile
         const decoded_size_upper_bound = size / 4 * 3;
