@@ -245,7 +245,9 @@ pub const Handshake = struct {
         h.output.advance(w.buffered().len);
     }
 
-    fn readClientFlight2(h: *Self, opt: Options) !void {
+    /// Out of line, so its record buffer and certificate checks stay out of
+    /// `handshake`'s frame while `serverFlight` runs.
+    noinline fn readClientFlight2(h: *Self, opt: Options) !void {
         // buffer for decrypted handshake records
         var cleartext_buffer: [max_cleartext_len]u8 = undefined;
         // cleartext writer
