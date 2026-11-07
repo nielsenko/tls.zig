@@ -242,9 +242,9 @@ pub const Crt = struct {
 
     /// `x^d (mod n)` by way of the two primes (RFC 8017, section 5.1.2,
     /// step 2.b).
-    fn pow(crt: Crt, n: Modulus, x: Fe) !Fe {
-        const p = crt.p;
-        const q = crt.q;
+    fn pow(crt: *const Crt, n: *const Modulus, x: Fe) !Fe {
+        const p = &crt.p;
+        const q = &crt.q;
 
         // The exponents are passed at the length of their prime, which is
         // public, rather than at the capacity of the largest key: `pow` works
@@ -331,9 +331,9 @@ pub const KeyPair = struct {
 
     /// `x^d (mod n)`: the one secret-key operation that signing and
     /// decrypting both come down to.
-    fn powSecret(kp: KeyPair, x: Fe) !Fe {
-        const n = kp.public.modulus;
-        if (kp.secret.crt) |crt| crt: {
+    fn powSecret(kp: *const KeyPair, x: Fe) !Fe {
+        const n = &kp.public.modulus;
+        if (kp.secret.crt) |*crt| crt: {
             const y = crt.pow(n, x) catch break :crt;
             // A fault in the middle of a CRT computation gives a result that
             // reveals a prime of the key (Boneh, DeMillo and Lipton, 1997).
@@ -354,19 +354,19 @@ pub const KeyPair = struct {
     }
 
     /// Deprecated.
-    pub fn signPkcsv1_5(kp: KeyPair, comptime Hash: type, msg: []const u8, out: []u8) !PKCS1v1_5(Hash).Signature {
+    pub fn signPkcsv1_5(kp: *const KeyPair, comptime Hash: type, msg: []const u8, out: []u8) !PKCS1v1_5(Hash).Signature {
         var st = try signerPkcsv1_5(kp, Hash);
         st.update(msg);
         return try st.finalize(out);
     }
 
     /// Deprecated.
-    pub fn signerPkcsv1_5(kp: KeyPair, comptime Hash: type) !PKCS1v1_5(Hash).Signer {
+    pub fn signerPkcsv1_5(kp: *const KeyPair, comptime Hash: type) !PKCS1v1_5(Hash).Signer {
         return PKCS1v1_5(Hash).Signer.init(kp);
     }
 
     /// Deprecated.
-    pub fn decryptPkcsv1_5(kp: KeyPair, ciphertext: []const u8, out: []u8) ![]const u8 {
+    pub fn decryptPkcsv1_5(kp: *const KeyPair, ciphertext: []const u8, out: []u8) ![]const u8 {
         const k = byteLen(kp.public.modulus.bits());
         if (out.len < k) return error.BufferTooSmall;
 
@@ -389,7 +389,7 @@ pub const KeyPair = struct {
     }
 
     pub fn signOaep(
-        kp: KeyPair,
+        kp: *const KeyPair,
         comptime Hash: type,
         msg: []const u8,
         salt: ?[]const u8,
@@ -402,12 +402,12 @@ pub const KeyPair = struct {
     }
 
     /// Salt must outlive returned `PSS.Signer`.
-    pub fn signerOaep(kp: KeyPair, comptime Hash: type, salt: ?[]const u8) !Pss(Hash).Signer {
+    pub fn signerOaep(kp: *const KeyPair, comptime Hash: type, salt: ?[]const u8) !Pss(Hash).Signer {
         return Pss(Hash).Signer.init(kp, salt);
     }
 
     pub fn decryptOaep(
-        kp: KeyPair,
+        kp: *const KeyPair,
         comptime Hash: type,
         ciphertext: []const u8,
         label: []const u8,
@@ -449,12 +449,12 @@ pub const KeyPair = struct {
     }
 
     /// Encrypt short plaintext with secret key.
-    pub fn encrypt(kp: KeyPair, plaintext: []const u8, out: []u8) !void {
-        const n = kp.public.modulus;
+    pub fn encrypt(kp: *const KeyPair, plaintext: []const u8, out: []u8) !void {
+        const n = &kp.public.modulus;
         const k = byteLen(n.bits());
         if (plaintext.len > k) return error.MessageTooLong;
 
-        const msg_as_int = try Fe.fromBytes(n, plaintext, .big);
+        const msg_as_int = try Fe.fromBytes(n.*, plaintext, .big);
         const enc_as_int = try kp.powSecret(msg_as_int);
         try enc_as_int.toBytes(out, .big);
     }
@@ -487,9 +487,9 @@ pub fn PKCS1v1_5(comptime Hash: type) type {
 
         pub const Signer = struct {
             h: Hash,
-            key_pair: KeyPair,
+            key_pair: *const KeyPair,
 
-            fn init(key_pair: KeyPair) Signer {
+            fn init(key_pair: *const KeyPair) Signer {
                 return .{
                     .h = Hash.init(.{}),
                     .key_pair = key_pair,
@@ -632,10 +632,10 @@ pub fn Pss(comptime Hash: type) type {
 
         pub const Signer = struct {
             h: Hash,
-            key_pair: KeyPair,
+            key_pair: *const KeyPair,
             salt: ?[]const u8,
 
-            fn init(key_pair: KeyPair, salt: ?[]const u8) Signer {
+            fn init(key_pair: *const KeyPair, salt: ?[]const u8) Signer {
                 return .{
                     .h = Hash.init(.{}),
                     .key_pair = key_pair,
@@ -1042,7 +1042,7 @@ test "rsa CRT signature matches the one made with d alone" {
     // The CRT computation itself, and not the fallback behind it, gives x^d.
     const n = kp.public.modulus;
     const x = try Fe.fromPrimitive(u64, n, 0x0123_4567_89ab_cdef);
-    const by_crt = try kp.secret.crt.?.pow(n, x);
+    const by_crt = try kp.secret.crt.?.pow(&n, x);
     const by_d = try n.pow(x, kp.secret.private_exponent);
     try std.testing.expect(by_crt.eql(by_d));
 
