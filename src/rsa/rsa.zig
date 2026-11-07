@@ -342,7 +342,13 @@ pub const KeyPair = struct {
             const back = n.powPublic(y, kp.public.public_exponent) catch break :crt;
             if (back.eql(x)) return y;
         }
+        return kp.powPrivateExponent(x);
+    }
 
+    /// `x^d (mod n)` with `d` alone. Out of line, so the CRT path in
+    /// `powSecret` does not carry its frame.
+    noinline fn powPrivateExponent(kp: *const KeyPair, x: Fe) !Fe {
+        const n = &kp.public.modulus;
         // The exponent is passed at the modulus's length rather than at the
         // capacity of the largest key: `pow` works through every byte it is
         // given, and a 2048-bit key's `d` in a 4096-bit field element is half
