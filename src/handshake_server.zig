@@ -18,7 +18,8 @@ const proto = @import("protocol.zig");
 const common = @import("handshake_common.zig");
 const CertificateBuilder = common.CertificateBuilder;
 const CertificateParser = common.CertificateParser;
-const DhKeyPair = common.DhKeyPair;
+/// The server has no use for ML-KEM, see `Handshake.supported_named_groups`.
+const DhKeyPair = common.DhKeyPairType(false);
 const CertKeyPair = common.CertKeyPair;
 const cert = common.cert;
 
@@ -73,6 +74,10 @@ pub const Handshake = struct {
     // public key len: x25519 = 32, secp256r1 = 65, secp384r1 = 97
     const max_pub_key_len = 98;
     const supported_named_groups = &[_]proto.NamedGroup{ .x25519, .secp256r1, .secp384r1 };
+    comptime {
+        // The server's DhKeyPair has no room for an ML-KEM key pair.
+        for (supported_named_groups) |group| assert(group != .x25519_ml_kem768);
+    }
 
     /// Underlying network connection stream reader/writer pair.
     input: *Io.Reader,

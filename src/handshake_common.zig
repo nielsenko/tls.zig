@@ -483,92 +483,105 @@ pub fn dupeMin(buf: []u8, data: []const u8) []u8 {
     return buf[0..n];
 }
 
-pub const DhKeyPair = struct {
-    x25519_kp: X25519.KeyPair = undefined,
-    secp256r1_kp: EcdsaP256Sha256.KeyPair = undefined,
-    secp384r1_kp: EcdsaP384Sha384.KeyPair = undefined,
-    ml_kem768: MLKem768.KeyPair = undefined,
+pub const DhKeyPair = DhKeyPairType(true);
 
-    secp256r1_pk_buf: [EcdsaP256Sha256.PublicKey.uncompressed_sec1_encoded_length]u8 = undefined, //65 bytes
-    secp384r1_pk_buf: [EcdsaP384Sha384.PublicKey.uncompressed_sec1_encoded_length]u8 = undefined, //97
-    ml_kem768_pk_buf: [MLKem768.PublicKey.encoded_length + X25519.public_length]u8 = undefined, // 1216
-    shared_key_buf: [64]u8 = undefined,
+/// Key pairs for the named groups. Without `with_ml_kem` the type has no
+/// room for an ML-KEM key pair and refuses x25519_ml_kem768.
+pub fn DhKeyPairType(comptime with_ml_kem: bool) type {
+    return struct {
+        x25519_kp: X25519.KeyPair = undefined,
+        secp256r1_kp: EcdsaP256Sha256.KeyPair = undefined,
+        secp384r1_kp: EcdsaP384Sha384.KeyPair = undefined,
+        ml_kem768: if (with_ml_kem) MLKem768.KeyPair else void = undefined,
 
-    pub const seed_len = 32 + 32 + 48 + 64 + 64;
+        secp256r1_pk_buf: [EcdsaP256Sha256.PublicKey.uncompressed_sec1_encoded_length]u8 = undefined, //65 bytes
+        secp384r1_pk_buf: [EcdsaP384Sha384.PublicKey.uncompressed_sec1_encoded_length]u8 = undefined, //97
+        ml_kem768_pk_buf: if (with_ml_kem) [MLKem768.PublicKey.encoded_length + X25519.public_length]u8 else void = undefined, // 1216
+        shared_key_buf: [64]u8 = undefined,
 
-    pub fn init(seed: [seed_len]u8, named_groups: []const proto.NamedGroup) !DhKeyPair {
-        var kp: DhKeyPair = .{};
-        for (named_groups) |ng|
-            switch (ng) {
-                .x25519 => kp.x25519_kp = X25519.KeyPair.generateDeterministic(seed[0..][0..X25519.seed_length].*),
-                .secp256r1 => kp.secp256r1_kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed[32..][0..EcdsaP256Sha256.KeyPair.seed_length].*),
-                .secp384r1 => kp.secp384r1_kp = try EcdsaP384Sha384.KeyPair.generateDeterministic(seed[32 + 32 ..][0..EcdsaP384Sha384.KeyPair.seed_length].*),
-                .x25519_ml_kem768 => kp.ml_kem768 = try MLKem768.KeyPair.generateDeterministic(seed[32 + 32 + 48 + 64 ..][0..MLKem768.seed_length].*),
+        const Self = @This();
+
+        pub const seed_len = 32 + 32 + 48 + 64 + 64;
+
+        pub fn init(seed: [seed_len]u8, named_groups: []const proto.NamedGroup) !Self {
+            var kp: Self = .{};
+            for (named_groups) |ng|
+                switch (ng) {
+                    .x25519 => kp.x25519_kp = X25519.KeyPair.generateDeterministic(seed[0..][0..X25519.seed_length].*),
+                    .secp256r1 => kp.secp256r1_kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed[32..][0..EcdsaP256Sha256.KeyPair.seed_length].*),
+                    .secp384r1 => kp.secp384r1_kp = try EcdsaP384Sha384.KeyPair.generateDeterministic(seed[32 + 32 ..][0..EcdsaP384Sha384.KeyPair.seed_length].*),
+                    .x25519_ml_kem768 => {
+                        if (!with_ml_kem) return error.TlsIllegalParameter;
+                        kp.ml_kem768 = try MLKem768.KeyPair.generateDeterministic(seed[32 + 32 + 48 + 64 ..][0..MLKem768.seed_length].*);
+                    },
+                    else => return error.TlsIllegalParameter,
+                };
+            return kp;
+        }
+
+        // x25519: 32,  secp256r1: 32, secp384r1: 48, x25519_ml_kem768: 64
+        pub fn sharedKey(self: *Self, named_group: proto.NamedGroup, server_pub_key: []const u8) ![]const u8 {
+            return switch (named_group) {
+                .x25519 => {
+                    if (server_pub_key.len != X25519.public_length)
+                        return error.TlsIllegalParameter;
+                    self.shared_key_buf[0..32].* = try X25519.scalarmult(
+                        self.x25519_kp.secret_key,
+                        server_pub_key[0..X25519.public_length].*,
+                    );
+                    return self.shared_key_buf[0..32];
+                },
+                .secp256r1 => {
+                    const pk = try EcdsaP256Sha256.PublicKey.fromSec1(server_pub_key);
+                    const mul = try pk.p.mulPublic(self.secp256r1_kp.secret_key.bytes, .big);
+                    self.shared_key_buf[0..32].* = mul.affineCoordinates().x.toBytes(.big);
+                    return self.shared_key_buf[0..32];
+                },
+                .secp384r1 => {
+                    const pk = try EcdsaP384Sha384.PublicKey.fromSec1(server_pub_key);
+                    const mul = try pk.p.mulPublic(self.secp384r1_kp.secret_key.bytes, .big);
+                    self.shared_key_buf[0..48].* = mul.affineCoordinates().x.toBytes(.big);
+                    return self.shared_key_buf[0..48];
+                },
+                .x25519_ml_kem768 => {
+                    if (!with_ml_kem) return error.TlsIllegalParameter;
+                    const hksl = crypto.kem.ml_kem.MLKem768.ciphertext_length;
+                    const xksl = hksl + crypto.dh.X25519.public_length;
+                    if (server_pub_key.len != xksl) return error.TlsIllegalParameter;
+
+                    const hsk = self.ml_kem768.secret_key.decaps(server_pub_key[0..hksl]) catch
+                        return error.TlsDecryptFailure;
+                    const xsk = crypto.dh.X25519.scalarmult(self.x25519_kp.secret_key, server_pub_key[hksl..xksl].*) catch
+                        return error.TlsDecryptFailure;
+                    self.shared_key_buf = (hsk ++ xsk);
+                    return &self.shared_key_buf;
+                },
                 else => return error.TlsIllegalParameter,
             };
-        return kp;
-    }
+        }
 
-    // x25519: 32,  secp256r1: 32, secp384r1: 48, x25519_ml_kem768: 64
-    pub fn sharedKey(self: *DhKeyPair, named_group: proto.NamedGroup, server_pub_key: []const u8) ![]const u8 {
-        return switch (named_group) {
-            .x25519 => {
-                if (server_pub_key.len != X25519.public_length)
-                    return error.TlsIllegalParameter;
-                self.shared_key_buf[0..32].* = try X25519.scalarmult(
-                    self.x25519_kp.secret_key,
-                    server_pub_key[0..X25519.public_length].*,
-                );
-                return self.shared_key_buf[0..32];
-            },
-            .secp256r1 => {
-                const pk = try EcdsaP256Sha256.PublicKey.fromSec1(server_pub_key);
-                const mul = try pk.p.mulPublic(self.secp256r1_kp.secret_key.bytes, .big);
-                self.shared_key_buf[0..32].* = mul.affineCoordinates().x.toBytes(.big);
-                return self.shared_key_buf[0..32];
-            },
-            .secp384r1 => {
-                const pk = try EcdsaP384Sha384.PublicKey.fromSec1(server_pub_key);
-                const mul = try pk.p.mulPublic(self.secp384r1_kp.secret_key.bytes, .big);
-                self.shared_key_buf[0..48].* = mul.affineCoordinates().x.toBytes(.big);
-                return self.shared_key_buf[0..48];
-            },
-            .x25519_ml_kem768 => {
-                const hksl = crypto.kem.ml_kem.MLKem768.ciphertext_length;
-                const xksl = hksl + crypto.dh.X25519.public_length;
-                if (server_pub_key.len != xksl) return error.TlsIllegalParameter;
-
-                const hsk = self.ml_kem768.secret_key.decaps(server_pub_key[0..hksl]) catch
-                    return error.TlsDecryptFailure;
-                const xsk = crypto.dh.X25519.scalarmult(self.x25519_kp.secret_key, server_pub_key[hksl..xksl].*) catch
-                    return error.TlsDecryptFailure;
-                self.shared_key_buf = (hsk ++ xsk);
-                return &self.shared_key_buf;
-            },
-            else => return error.TlsIllegalParameter,
-        };
-    }
-
-    // Returns 32, 65, 97 or 1216 bytes ml_kem
-    pub fn publicKey(self: *DhKeyPair, named_group: proto.NamedGroup) ![]const u8 {
-        return switch (named_group) {
-            .x25519 => &self.x25519_kp.public_key,
-            .secp256r1 => {
-                self.secp256r1_pk_buf = self.secp256r1_kp.public_key.toUncompressedSec1();
-                return &self.secp256r1_pk_buf;
-            },
-            .secp384r1 => {
-                self.secp384r1_pk_buf = self.secp384r1_kp.public_key.toUncompressedSec1();
-                return &self.secp384r1_pk_buf;
-            },
-            .x25519_ml_kem768 => {
-                self.ml_kem768_pk_buf = self.ml_kem768.public_key.toBytes() ++ self.x25519_kp.public_key;
-                return &self.ml_kem768_pk_buf;
-            },
-            else => return error.TlsIllegalParameter,
-        };
-    }
-};
+        // Returns 32, 65, 97 or 1216 bytes ml_kem
+        pub fn publicKey(self: *Self, named_group: proto.NamedGroup) ![]const u8 {
+            return switch (named_group) {
+                .x25519 => &self.x25519_kp.public_key,
+                .secp256r1 => {
+                    self.secp256r1_pk_buf = self.secp256r1_kp.public_key.toUncompressedSec1();
+                    return &self.secp256r1_pk_buf;
+                },
+                .secp384r1 => {
+                    self.secp384r1_pk_buf = self.secp384r1_kp.public_key.toUncompressedSec1();
+                    return &self.secp384r1_pk_buf;
+                },
+                .x25519_ml_kem768 => {
+                    if (!with_ml_kem) return error.TlsIllegalParameter;
+                    self.ml_kem768_pk_buf = self.ml_kem768.public_key.toBytes() ++ self.x25519_kp.public_key;
+                    return &self.ml_kem768_pk_buf;
+                },
+                else => return error.TlsIllegalParameter,
+            };
+        }
+    };
+}
 
 const testing = std.testing;
 const testu = @import("testu.zig");
