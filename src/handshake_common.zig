@@ -237,46 +237,12 @@ pub const CertificateBuilder = struct {
         const signature, const signature_scheme = switch (h.cert_key_pair.key.signature_scheme) {
             inline .ecdsa_secp256r1_sha256,
             .ecdsa_secp384r1_sha384,
-            => |comptime_scheme| brk: {
-                const Ecdsa = SchemeEcdsa(comptime_scheme);
-                const key_pair = switch (comptime_scheme) {
-                    .ecdsa_secp256r1_sha256 => h.cert_key_pair.ecdsa_key_pair.?.ecdsa_secp256r1_sha256,
-                    .ecdsa_secp384r1_sha384 => h.cert_key_pair.ecdsa_key_pair.?.ecdsa_secp384r1_sha384,
-                    else => unreachable,
-                };
-                var signer = try key_pair.signer(null);
-                h.setSignatureVerifyBytes(&signer);
-                const signature = try signer.finalize();
-                break :brk .{
-                    signature.toDer(buf[0..Ecdsa.Signature.der_encoded_length_max]),
-                    comptime_scheme,
-                };
-            },
+            => |comptime_scheme| .{ try h.signEcdsa(comptime_scheme, &buf), comptime_scheme },
             inline .rsa_pss_rsae_sha256,
             .rsa_pss_rsae_sha384,
             .rsa_pss_rsae_sha512,
-            => |comptime_scheme| brk: {
-                const Hash = SchemeHash(comptime_scheme);
-                var signer = try h.cert_key_pair.key.key.rsa.signerOaep(Hash, null);
-                h.setSignatureVerifyBytes(&signer);
-                const signature = try signer.finalize(&buf, h.rng);
-                break :brk .{ signature.bytes, comptime_scheme };
-            },
-            .ed25519 => brk: {
-                // EdDSA signs the whole message in one shot (no incremental
-                // hash state), so unlike the branches above this bypasses
-                // setSignatureVerifyBytes and builds the TLS 1.3 CertificateVerify
-                // content directly. Ed25519 isn't defined for TLS 1.2's
-                // CertificateVerify construction, so tls_1_2 isn't handled here.
-                const Eddsa = crypto.sign.Ed25519;
-                const message = if (h.side == .server)
-                    h.transcript.serverCertificateVerify()
-                else
-                    h.transcript.clientCertificateVerify();
-                const signature = try h.cert_key_pair.key.key.ed25519.sign(message, null);
-                buf[0..Eddsa.Signature.encoded_length].* = signature.toBytes();
-                break :brk .{ buf[0..Eddsa.Signature.encoded_length], .ed25519 };
-            },
+            => |comptime_scheme| .{ try h.signRsaPss(comptime_scheme, &buf), comptime_scheme },
+            .ed25519 => .{ try h.signEd25519(&buf), .ed25519 },
             else => return error.TlsUnknownSignatureScheme,
         };
 
@@ -284,6 +250,46 @@ pub const CertificateBuilder = struct {
         try w.enumValue(signature_scheme);
         try w.int(u16, signature.len);
         try w.slice(signature);
+    }
+
+    // Each scheme signs in a function of its own, out of line, so a handshake
+    // carries only the frame of the scheme it uses.
+
+    noinline fn signEcdsa(h: CertificateBuilder, comptime scheme: proto.SignatureScheme, buf: *[512]u8) ![]const u8 {
+        const Ecdsa = SchemeEcdsa(scheme);
+        const key_pair = switch (scheme) {
+            .ecdsa_secp256r1_sha256 => h.cert_key_pair.ecdsa_key_pair.?.ecdsa_secp256r1_sha256,
+            .ecdsa_secp384r1_sha384 => h.cert_key_pair.ecdsa_key_pair.?.ecdsa_secp384r1_sha384,
+            else => unreachable,
+        };
+        var signer = try key_pair.signer(null);
+        h.setSignatureVerifyBytes(&signer);
+        const signature = try signer.finalize();
+        return signature.toDer(buf[0..Ecdsa.Signature.der_encoded_length_max]);
+    }
+
+    noinline fn signRsaPss(h: CertificateBuilder, comptime scheme: proto.SignatureScheme, buf: *[512]u8) ![]const u8 {
+        const Hash = SchemeHash(scheme);
+        var signer = try h.cert_key_pair.key.key.rsa.signerOaep(Hash, null);
+        h.setSignatureVerifyBytes(&signer);
+        const signature = try signer.finalize(buf, h.rng);
+        return signature.bytes;
+    }
+
+    noinline fn signEd25519(h: CertificateBuilder, buf: *[512]u8) ![]const u8 {
+        // EdDSA signs the whole message in one shot (no incremental hash
+        // state), so unlike the schemes above this bypasses
+        // setSignatureVerifyBytes and builds the TLS 1.3 CertificateVerify
+        // content directly. Ed25519 isn't defined for TLS 1.2's
+        // CertificateVerify construction, so tls_1_2 isn't handled here.
+        const Eddsa = crypto.sign.Ed25519;
+        const message = if (h.side == .server)
+            h.transcript.serverCertificateVerify()
+        else
+            h.transcript.clientCertificateVerify();
+        const signature = try h.cert_key_pair.key.key.ed25519.sign(message, null);
+        buf[0..Eddsa.Signature.encoded_length].* = signature.toBytes();
+        return buf[0..Eddsa.Signature.encoded_length];
     }
 
     fn setSignatureVerifyBytes(h: CertificateBuilder, signer: anytype) void {
