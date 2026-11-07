@@ -333,7 +333,10 @@ pub const CertificateParser = struct {
     skip_verify: bool = false,
     now_sec: i64,
 
-    pub fn parseCertificate(h: *CertificateParser, d: *record.Decoder, tls_version: proto.Version) !void {
+    // parseCertificate and verifySignature are out of line, so a caller
+    // carries their frames only while it checks a certificate.
+
+    pub noinline fn parseCertificate(h: *CertificateParser, d: *record.Decoder, tls_version: proto.Version) !void {
         if (tls_version == .tls_1_3) {
             const request_context = try d.decode(u8);
             if (request_context != 0) return error.TlsIllegalParameter;
@@ -391,7 +394,7 @@ pub const CertificateParser = struct {
         h.signature = try dupe(&h.signature_buf, try d.slice(try d.decode(u16)));
     }
 
-    pub fn verifySignature(h: *CertificateParser, verify_bytes: []const u8) !void {
+    pub noinline fn verifySignature(h: *CertificateParser, verify_bytes: []const u8) !void {
         switch (h.signature_scheme) {
             inline .ecdsa_secp256r1_sha256,
             .ecdsa_secp384r1_sha384,
