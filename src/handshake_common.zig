@@ -398,51 +398,62 @@ pub const CertificateParser = struct {
         switch (h.signature_scheme) {
             inline .ecdsa_secp256r1_sha256,
             .ecdsa_secp384r1_sha384,
-            => |comptime_scheme| {
-                if (h.pub_key_algo != .X9_62_id_ecPublicKey) return error.TlsBadSignatureScheme;
-                const cert_named_curve = h.pub_key_algo.X9_62_id_ecPublicKey;
-                switch (cert_named_curve) {
-                    inline .secp384r1, .X9_62_prime256v1 => |comptime_cert_named_curve| {
-                        const Ecdsa = SchemeEcdsaCert(comptime_scheme, comptime_cert_named_curve);
-                        const key = try Ecdsa.PublicKey.fromSec1(h.pub_key);
-                        const sig = try Ecdsa.Signature.fromDer(h.signature);
-                        try sig.verify(verify_bytes, key);
-                    },
-                    else => return error.TlsUnknownSignatureScheme,
-                }
-            },
-            .ed25519 => {
-                if (h.pub_key_algo != .curveEd25519) return error.TlsBadSignatureScheme;
-                const Eddsa = crypto.sign.Ed25519;
-                if (h.signature.len != Eddsa.Signature.encoded_length) return error.InvalidEncoding;
-                const sig = Eddsa.Signature.fromBytes(h.signature[0..Eddsa.Signature.encoded_length].*);
-                if (h.pub_key.len != Eddsa.PublicKey.encoded_length) return error.InvalidEncoding;
-                const key = try Eddsa.PublicKey.fromBytes(h.pub_key[0..Eddsa.PublicKey.encoded_length].*);
-                try sig.verify(verify_bytes, key);
-            },
+            => |comptime_scheme| try h.verifyEcdsa(comptime_scheme, verify_bytes),
+            .ed25519 => try h.verifyEd25519(verify_bytes),
             inline .rsa_pss_rsae_sha256,
             .rsa_pss_rsae_sha384,
             .rsa_pss_rsae_sha512,
-            => |comptime_scheme| {
-                if (h.pub_key_algo != .rsaEncryption) return error.TlsBadSignatureScheme;
-                const Hash = SchemeHash(comptime_scheme);
-                const pk = try rsa.PublicKey.fromDer(h.pub_key);
-                const sig = rsa.Pss(Hash).Signature{ .bytes = h.signature };
-                try sig.verify(verify_bytes, pk, null);
-            },
+            => |comptime_scheme| try h.verifyRsaPss(comptime_scheme, verify_bytes),
             inline .rsa_pkcs1_sha1,
             .rsa_pkcs1_sha256,
             .rsa_pkcs1_sha384,
             .rsa_pkcs1_sha512,
-            => |comptime_scheme| {
-                if (h.pub_key_algo != .rsaEncryption) return error.TlsBadSignatureScheme;
-                const Hash = SchemeHash(comptime_scheme);
-                const pk = try rsa.PublicKey.fromDer(h.pub_key);
-                const sig = rsa.PKCS1v1_5(Hash).Signature{ .bytes = h.signature };
-                try sig.verify(verify_bytes, pk);
+            => |comptime_scheme| try h.verifyRsaPkcs1(comptime_scheme, verify_bytes),
+            else => return error.TlsUnknownSignatureScheme,
+        }
+    }
+
+    // Each scheme verifies in a function of its own, out of line, so a
+    // handshake carries only the frame of the scheme it checks.
+
+    noinline fn verifyEcdsa(h: *CertificateParser, comptime scheme: proto.SignatureScheme, verify_bytes: []const u8) !void {
+        if (h.pub_key_algo != .X9_62_id_ecPublicKey) return error.TlsBadSignatureScheme;
+        const cert_named_curve = h.pub_key_algo.X9_62_id_ecPublicKey;
+        switch (cert_named_curve) {
+            inline .secp384r1, .X9_62_prime256v1 => |comptime_cert_named_curve| {
+                const Ecdsa = SchemeEcdsaCert(scheme, comptime_cert_named_curve);
+                const key = try Ecdsa.PublicKey.fromSec1(h.pub_key);
+                const sig = try Ecdsa.Signature.fromDer(h.signature);
+                try sig.verify(verify_bytes, key);
             },
             else => return error.TlsUnknownSignatureScheme,
         }
+    }
+
+    noinline fn verifyEd25519(h: *CertificateParser, verify_bytes: []const u8) !void {
+        if (h.pub_key_algo != .curveEd25519) return error.TlsBadSignatureScheme;
+        const Eddsa = crypto.sign.Ed25519;
+        if (h.signature.len != Eddsa.Signature.encoded_length) return error.InvalidEncoding;
+        const sig = Eddsa.Signature.fromBytes(h.signature[0..Eddsa.Signature.encoded_length].*);
+        if (h.pub_key.len != Eddsa.PublicKey.encoded_length) return error.InvalidEncoding;
+        const key = try Eddsa.PublicKey.fromBytes(h.pub_key[0..Eddsa.PublicKey.encoded_length].*);
+        try sig.verify(verify_bytes, key);
+    }
+
+    noinline fn verifyRsaPss(h: *CertificateParser, comptime scheme: proto.SignatureScheme, verify_bytes: []const u8) !void {
+        if (h.pub_key_algo != .rsaEncryption) return error.TlsBadSignatureScheme;
+        const Hash = SchemeHash(scheme);
+        const pk = try rsa.PublicKey.fromDer(h.pub_key);
+        const sig = rsa.Pss(Hash).Signature{ .bytes = h.signature };
+        try sig.verify(verify_bytes, pk, null);
+    }
+
+    noinline fn verifyRsaPkcs1(h: *CertificateParser, comptime scheme: proto.SignatureScheme, verify_bytes: []const u8) !void {
+        if (h.pub_key_algo != .rsaEncryption) return error.TlsBadSignatureScheme;
+        const Hash = SchemeHash(scheme);
+        const pk = try rsa.PublicKey.fromDer(h.pub_key);
+        const sig = rsa.PKCS1v1_5(Hash).Signature{ .bytes = h.signature };
+        try sig.verify(verify_bytes, pk);
     }
 
     fn SchemeEcdsaCert(comptime scheme: proto.SignatureScheme, comptime cert_named_curve: Certificate.NamedCurve) type {
