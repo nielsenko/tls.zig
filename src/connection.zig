@@ -590,14 +590,7 @@ pub const Connection = struct {
             switch (pattern.len) {
                 0 => {},
                 1 => {
-                    var buffer: [cipher.max_cleartext_len]u8 = undefined;
-                    @memset(&buffer, pattern[0]);
-                    var remaining = splat;
-                    while (remaining > 0) {
-                        const chunk_len = @min(remaining, buffer.len);
-                        try self.writeAll(buffer[0..chunk_len]);
-                        remaining -= chunk_len;
-                    }
+                    try self.splatByte(pattern[0], splat);
                     n += splat;
                 },
                 else => for (0..splat) |_| {
@@ -609,6 +602,19 @@ pub const Connection = struct {
             // Number of bytes consumed from `data` is returned, excluding bytes
             // from w.buffer.
             return n;
+        }
+
+        /// Writes `byte` `n` times. Out of line, so `drain` does not carry
+        /// the buffer on every flush.
+        noinline fn splatByte(self: *Writer, byte: u8, n: usize) Io.Writer.Error!void {
+            var buffer: [cipher.max_cleartext_len]u8 = undefined;
+            @memset(&buffer, byte);
+            var remaining = n;
+            while (remaining > 0) {
+                const chunk_len = @min(remaining, buffer.len);
+                try self.writeAll(buffer[0..chunk_len]);
+                remaining -= chunk_len;
+            }
         }
 
         fn writeAll(self: *Writer, bytes: []const u8) Io.Writer.Error!void {
@@ -813,6 +819,38 @@ test "client/server connection" {
         try testing.expectEqual(n, nr);
         try testing.expectEqualSlices(u8, client_cleartext, server_cleartext);
     }
+}
+
+test "Connection.Writer: a one-byte splat spans several records" {
+    const rng_impl: std.Random.IoSource = .{ .io = testing.io };
+    const rng = rng_impl.interface();
+
+    const cipher_client, const cipher_server = brk: {
+        const Transcript = @import("transcript.zig").Transcript;
+        var rnd_buf: [128]u8 = undefined;
+        rng.bytes(&rnd_buf);
+        const secret = Transcript.Secret{ .client = rnd_buf[0..64], .server = rnd_buf[64..] };
+        break :brk .{
+            try Cipher.initTls13(.AES_256_GCM_SHA384, secret, .client),
+            try Cipher.initTls13(.AES_256_GCM_SHA384, secret, .server),
+        };
+    };
+
+    var ciphertext_buf: [cipher.max_ciphertext_record_len * 3]u8 = undefined;
+    var ciphertext: Io.Writer = .fixed(&ciphertext_buf);
+    var client_conn: Connection = .{ .input = undefined, .output = &ciphertext, .cipher = cipher_client };
+
+    const n = 2 * cipher.max_cleartext_len + 100;
+    var write_buf: [64]u8 = undefined;
+    var writer = client_conn.writer(&write_buf);
+    try writer.interface.splatByteAll('a', n);
+    try writer.interface.flush();
+
+    var input: Io.Reader = .fixed(ciphertext.buffered());
+    var server_conn: Connection = .{ .input = &input, .output = undefined, .cipher = cipher_server };
+    var cleartext: [n + 1]u8 = undefined;
+    try testing.expectEqual(n, try server_conn.readAll(&cleartext));
+    try testing.expect(std.mem.allEqual(u8, cleartext[0..n], 'a'));
 }
 
 test "read queues protocol alert without writing" {
